@@ -70,14 +70,15 @@ class GroqClient:
         return self._extract_text(response)
 
     def generate_json(
-        self,
-        prompt,
-        schema,
-        schema_name="response",
-        system_prompt=None,
-        max_completion_tokens=3000,
-        reasoning_effort="low",
-    ):
+    self,
+    prompt,
+    schema,
+    schema_name="response",
+    system_prompt=None,
+    max_completion_tokens=3000,
+    reasoning_effort="low",
+    history=None,
+):
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("Prompt cannot be empty.")
 
@@ -95,6 +96,7 @@ class GroqClient:
                     "role": "system",
                     "content": system_prompt or "Return valid JSON.",
                 },
+                *(history or []),
                 {"role": "user", "content": prompt},
             ]
         else:
@@ -108,6 +110,7 @@ class GroqClient:
                         + json.dumps(schema, ensure_ascii=False)
                     ),
                 },
+                *(history or []),
                 {"role": "user", "content": prompt},
             ]
 
@@ -230,8 +233,7 @@ class GroqClient:
             body = exc.response.json()
         except (ValueError, AttributeError):
             body = getattr(exc, "body", None)
-            print("ERROR BODY:", body)
-
+            
         if not isinstance(body, dict):
             return None
 

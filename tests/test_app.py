@@ -14,7 +14,6 @@ from app import (
     ATTEMPTS_KEY,
 )
 
-
 from classbuild.models.course import validate_outline
 from classbuild.models.lesson import validate_lesson
 from classbuild.models.quiz import validate_quiz
@@ -26,7 +25,6 @@ from tests.fixtures import (
 )
 
 
- 
 # Fake Generators
 
 
@@ -94,6 +92,8 @@ class FakeQuizGenerator:
 
 
 # Test Helpers
+
+
 def app_script():
     import app
     app.main()
@@ -102,20 +102,45 @@ def app_script():
 def start():
     return AppTest.from_function(app_script).run()
 
+
 def submit(app, topic="Python Programming"):
     app.text_input[0].set_value(topic)
-
     app.button[0].click()
 
     return app.run()
 
 
 def lesson_button(app, lesson_number):
-    button = app.button(
-        key=f"generate_lesson_{lesson_number}"
+    button = next(
+        (
+            item for item in app.button
+            if item.key
+            and item.key.startswith("generate_lesson_")
+            and item.key.endswith(f"_{lesson_number}")
+        ),
+        None,
     )
-    button.click()
 
+    if button is None:
+        raise AssertionError(
+            f"Generate Lesson button not found for lesson {lesson_number}"
+        )
+
+    button.click()
+    return app.run()
+
+
+def open_quiz(app, lesson_number):
+    course_id = app.session_state.get(
+        COURSE_ID_KEY, "no_course"
+    )
+
+    button = app.button(
+        key=f"generate_quiz_{course_id}_{lesson_number}"
+    )
+
+    button.click()
+    
     return app.run()
 
 
@@ -131,15 +156,6 @@ def prefix(app, lesson_number, attempt=0):
         f"_l{lesson_number}"
         f"_a{attempt}"
     )
-
-
-def open_quiz(app, lesson_number):
-    button = app.button(
-        key=f"generate_quiz_{lesson_number}"
-    )
-    button.click()
-
-    return app.run()
 
 
 def quiz_radios(app):
@@ -167,11 +183,10 @@ def prepare_lesson_and_quiz(app, lesson_number=1):
     return app
 
 
- 
-# App Tests Course and Lesson Behaviour
+# Shared Test Setup
 
 
-class AppTests(unittest.TestCase):
+class BaseAppTest(unittest.TestCase):
 
     def setUp(self):
         FakeCourseGenerator.calls = 0
@@ -186,10 +201,12 @@ class AppTests(unittest.TestCase):
             "app.CourseGenerator",
             FakeCourseGenerator,
         )
+
         self.lesson_patch = patch(
             "app.LessonGenerator",
             FakeLessonGenerator,
         )
+
         self.quiz_patch = patch(
             "app.QuizGenerator",
             FakeQuizGenerator,
@@ -205,19 +222,55 @@ class AppTests(unittest.TestCase):
 
         self.app = start()
 
+
+# Learning Materials UI Tests
+
+
+class LearningMaterialsAppTests(BaseAppTest):
+
+    def test_learning_materials_section_is_rendered(self):
+        headers = [
+            element.value
+            for element in self.app.header
+        ]
+
+        self.assertIn("Learning Materials", headers)
+
+    def test_pdf_uploader_is_available(self):
+        self.assertEqual(
+            len(self.app.get("file_uploader")),
+            1,
+        )
+
+    def test_no_pdf_does_not_create_document_state(self):
+        from classbuild.rag.document_state import DOC_KEY
+
+        self.assertIsNone(
+            self.app.session_state.get(DOC_KEY)
+        )
+
+
+# Course and Lesson Behaviour Tests
+
+
+class AppTests(BaseAppTest):
+
     def test_invalid_topic_does_not_call_groq(self):
         submit(self.app, "   ")
 
         self.assertEqual(FakeCourseGenerator.calls, 0)
+
         self.assertIsNone(
             self.app.session_state.get(OUTLINE_KEY)
         )
+
         self.assertTrue(self.app.error)
 
     def test_valid_submit_generates_once_and_survives_reruns(self):
         submit(self.app, "Python Programming")
 
         self.assertEqual(FakeCourseGenerator.calls, 1)
+
         self.assertIsNotNone(
             self.app.session_state[OUTLINE_KEY]
         )
@@ -225,6 +278,7 @@ class AppTests(unittest.TestCase):
         self.app.run()
 
         self.assertEqual(FakeCourseGenerator.calls, 1)
+
         self.assertIsNotNone(
             self.app.session_state[OUTLINE_KEY]
         )
@@ -248,15 +302,33 @@ class AppTests(unittest.TestCase):
         submit(self.app)
 
         lesson_button(self.app, 1)
-        self.assertEqual(FakeLessonGenerator.calls, [1])
+
+        self.assertEqual(
+            FakeLessonGenerator.calls,
+            [1],
+        )
 
         lesson_button(self.app, 2)
-        self.assertEqual(FakeLessonGenerator.calls, [1, 2])
 
-        self.assertIn(1, self.app.session_state[LESSONS_KEY])
-        self.assertIn(2, self.app.session_state[LESSONS_KEY])
+        self.assertEqual(
+            FakeLessonGenerator.calls,
+            [1, 2],
+        )
 
-        self.assertEqual(FakeLessonGenerator.calls, [1, 2])
+        self.assertIn(
+            1,
+            self.app.session_state[LESSONS_KEY],
+        )
+
+        self.assertIn(
+            2,
+            self.app.session_state[LESSONS_KEY],
+        )
+
+        self.assertEqual(
+            FakeLessonGenerator.calls,
+            [1, 2],
+        )
 
     def test_new_course_clears_lessons(self):
         submit(self.app)
@@ -277,26 +349,40 @@ class AppTests(unittest.TestCase):
 
     def test_failed_lesson_keeps_existing_content(self):
         submit(self.app)
-        original_generate_lesson = FakeLessonGenerator.generate_lesson
+
         lesson_button(self.app, 1)
 
         original = self.app.session_state[LESSONS_KEY][1]
 
-        FakeLessonGenerator.generate_lesson = (
-            lambda self, outline, number: (
-                (_ for _ in ()).throw(
-                    RuntimeError("Lesson generation failed")
+        original_generate_lesson = (
+            FakeLessonGenerator.generate_lesson
+        )
+
+        try:
+            FakeLessonGenerator.generate_lesson = (
+                lambda self, outline, number: (
+                    (_ for _ in ()).throw(
+                        RuntimeError("Lesson generation failed")
+                    )
                 )
             )
-        )
 
-        lesson_button(self.app, 2)
+            lesson_button(self.app, 2)
 
-        self.assertEqual(
-            self.app.session_state[LESSONS_KEY][1],
-            original,
-        )
-        FakeLessonGenerator.generate_lesson = original_generate_lesson
+            self.assertEqual(
+                self.app.session_state[LESSONS_KEY][1],
+                original,
+            )
+
+            self.assertNotIn(
+                2,
+                self.app.session_state[LESSONS_KEY],
+            )
+
+        finally:
+            FakeLessonGenerator.generate_lesson = (
+                original_generate_lesson
+            )
 
     def test_structured_generation_failure_shows_clear_error(self):
         with patch.object(
@@ -307,56 +393,35 @@ class AppTests(unittest.TestCase):
             submit(self.app)
 
         self.assertTrue(self.app.error)
+
         self.assertIsNone(
             self.app.session_state.get(OUTLINE_KEY)
         )
 
+
 # Quiz App Tests
 
 
-class QuizAppTests(unittest.TestCase):
+class QuizAppTests(BaseAppTest):
 
     def setUp(self):
-        FakeCourseGenerator.calls = 0
-        FakeCourseGenerator.should_fail = False
-
-        FakeLessonGenerator.calls = []
-
-        FakeQuizGenerator.calls = []
-        FakeQuizGenerator.should_fail = False
-
-        self.course_patch = patch(
-            "app.CourseGenerator",
-            FakeCourseGenerator,
-        )
-        self.lesson_patch = patch(
-            "app.LessonGenerator",
-            FakeLessonGenerator,
-        )
-        self.quiz_patch = patch(
-            "app.QuizGenerator",
-            FakeQuizGenerator,
-        )
-
-        self.course_patch.start()
-        self.lesson_patch.start()
-        self.quiz_patch.start()
-
-        self.addCleanup(self.course_patch.stop)
-        self.addCleanup(self.lesson_patch.stop)
-        self.addCleanup(self.quiz_patch.stop)
-
-        self.app = start()
+        super().setUp()
 
         submit(self.app)
-
         lesson_button(self.app, 1)
 
     def test_generate_quiz_shows_unanswered_questions(self):
         open_quiz(self.app, 1)
 
-        self.assertEqual(FakeQuizGenerator.calls, [1])
-        self.assertEqual(len(quiz_radios(self.app)), 5)
+        self.assertEqual(
+            FakeQuizGenerator.calls,
+            [1],
+        )
+
+        self.assertEqual(
+            len(quiz_radios(self.app)),
+            5,
+        )
 
         for radio in quiz_radios(self.app):
             self.assertIsNone(radio.value)
@@ -367,18 +432,23 @@ class QuizAppTests(unittest.TestCase):
         answers = [0, 0, 0, 3, 1]
 
         answer(self.app, answers)
-       
+
         next(
             button
             for button in self.app.form_submit_button
             if button.label == "Submit Answers"
         ).click()
+
         self.app.run()
 
         result = self.app.session_state[RESULTS_KEY][1]
 
         self.assertEqual(result.percentage, 60)
-        self.assertEqual(FakeQuizGenerator.calls, [1])
+
+        self.assertEqual(
+            FakeQuizGenerator.calls,
+            [1],
+        )
 
     def test_incomplete_submission_is_rejected(self):
         open_quiz(self.app, 1)
@@ -393,6 +463,7 @@ class QuizAppTests(unittest.TestCase):
             for button in self.app.form_submit_button
             if button.label == "Submit Answers"
         ).click()
+
         self.app.run()
 
         self.assertNotIn(
@@ -404,13 +475,6 @@ class QuizAppTests(unittest.TestCase):
 
     def test_try_again_keeps_questions_and_clears_answers(self):
         open_quiz(self.app, 1)
-        print(
-            "LESSON NUMBERS:",
-            [
-                lesson.lesson_number
-                for lesson in self.app.session_state[OUTLINE_KEY].lessons
-            ],
-        )
 
         quiz_before = self.app.session_state[QUIZZES_KEY][1]
 
@@ -421,6 +485,7 @@ class QuizAppTests(unittest.TestCase):
             for button in self.app.form_submit_button
             if button.label == "Submit Answers"
         ).click()
+
         self.app.run()
 
         self.assertIn(
@@ -454,7 +519,10 @@ class QuizAppTests(unittest.TestCase):
             1,
         )
 
-        self.assertEqual(FakeQuizGenerator.calls, [1])
+        self.assertEqual(
+            FakeQuizGenerator.calls,
+            [1],
+        )
 
         for radio in quiz_radios(self.app):
             self.assertIsNone(radio.value)

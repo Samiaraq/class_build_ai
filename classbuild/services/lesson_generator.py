@@ -115,13 +115,32 @@ Requirements:
 Return JSON matching the provided schema.
 """
 
+def _without_source_fields(schema: dict) -> dict:
+    schema = dict(schema)
+    schema["properties"] = dict(schema["properties"])
 
+    schema["properties"].pop("grounding", None)
+
+    for definition_name in (
+        "LessonGrounding",
+        "SourceReference",
+    ):
+        schema.get("$defs", {}).pop(definition_name, None)
+
+    for definition in schema.get("$defs", {}).values():
+        properties = definition.get("properties", {})
+        properties.pop("source_ids", None)
+
+    return schema
 def lesson_json_schema(lesson) -> dict:
-    schema = LessonContent.model_json_schema()
+    schema = _without_source_fields(
+        LessonContent.model_json_schema()
+    )
 
     schema["properties"]["lesson_number"]["enum"] = [
         lesson.lesson_number
     ]
+
     schema["properties"]["title"]["enum"] = [
         lesson.title
     ]

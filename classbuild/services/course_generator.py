@@ -30,9 +30,26 @@ Create high-quality course outlines that follow these rules:
 - Organize lessons from introductory to more advanced concepts.
 - Avoid repeating topics across lessons.
 - Write clear and practical learning objectives.
+- Each lesson MUST have between 1 and 3 learning objectives.
+- Never provide more than 3 learning objectives for any lesson.
 - Ensure every lesson contributes to the overall course goals.
 - Follow the requested number of lessons exactly.
-- Return only valid JSON matching the provided schema.
+
+IMPORTANT LESSON NUMBERING RULES:
+- The first lesson MUST have number 1.
+- The second lesson MUST have number 2.
+- Continue numbering consecutively without gaps.
+- The final lesson MUST have the exact requested lesson count as its number.
+- Never start numbering from 0.
+- Never skip, repeat, or use duplicate lesson numbers.
+
+IMPORTANT LEARNING OBJECTIVES RULES:
+- Each lesson MUST contain at least 1 and at most 3 learning objectives.
+- Count the objectives before returning the JSON.
+- If a lesson has 4 or more objectives, reduce them to 3.
+- Do not add extra objectives.
+
+Return only valid JSON matching the provided schema.
 """
 
 RETRY_SYSTEM_PROMPT = """

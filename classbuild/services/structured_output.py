@@ -2,7 +2,6 @@ import copy
 import json
 import logging
 
-from pydantic import ValidationError
 
 from classbuild.llm.exceptions import (
     EmptyResponseError,
@@ -73,18 +72,32 @@ def describe_validation_error(exc):
 
 
 def _log_structured_failure(logger, model, attempt, exc):
-    module_logger = logger or logging.getLogger(__name__)
+    module_logger = logging.getLogger(__name__)
+
     preview = str(exc)[:LOG_PREVIEW_CHARS]
     category = getattr(exc, "category", type(exc).__name__)
 
-    module_logger.warning(
+    message = (
         "Structured generation failed | model=%s | attempt=%s | "
-        "category=%s | preview=%s",
+        "category=%s | preview=%s"
+    )
+
+    module_logger.warning(
+        message,
         model,
         attempt,
         category,
         preview,
     )
+
+    if logger is not None and logger.name != module_logger.name:
+        logger.warning(
+            message,
+            model,
+            attempt,
+            category,
+            preview,
+        )
 
 
 def request_structured_json(
@@ -107,17 +120,7 @@ def request_structured_json(
 
     for attempt in range(MAX_ATTEMPTS):
         try:
-            messages = [
-                {
-                    "role": "system",
-                    "content": system_prompts[attempt],
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ]
-
+          
             result = client.generate_json(
                 prompt=prompt,
                 schema=schema,
@@ -135,7 +138,7 @@ def request_structured_json(
         except InvalidJSONError as exc:
             last_error = exc
             _log_structured_failure(
-                logging.getLogger(__name__),
+                logger,
                 getattr(client, "model", "unknown"),
                 attempt + 1,
                 exc,
@@ -144,7 +147,7 @@ def request_structured_json(
         except json.JSONDecodeError as exc:
             last_error = exc
             _log_structured_failure(
-                logging.getLogger(__name__),
+                logger,
                 getattr(client, "model", "unknown"),
                 attempt + 1,
                 exc,
