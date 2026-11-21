@@ -1,6 +1,10 @@
 
 import logging
+import re
 import uuid
+from datetime import datetime, timezone
+
+from pydantic import ValidationError
 
 import streamlit as st
 from classbuild.rag.document_state import (
@@ -32,6 +36,19 @@ from classbuild.rag.retriever import (
 )
 
 from classbuild.rag.embeddings import EmbeddingError
+
+from classbuild.persistence import (
+    CourseStore,
+    CourseStorageError,
+    InvalidCourseIdError,
+    CourseNotFoundError,
+    CourseFileTooLargeError,
+    CorruptedCourseFileError,
+    UnsupportedSchemaVersionError,
+    build_saved_course,
+    new_course_id,
+)
+from classbuild.export import course_to_markdown, course_filename
 from classbuild.course_config import (
     DIFFICULTY_LEVELS,
     DEFAULT_DIFFICULTY,
@@ -51,11 +68,7 @@ from classbuild.services.quiz_grader import (
 from classbuild.services.structured_output import (
     CourseGenerationError,
     ContentValidationError,
-    StructuredGenerationError,
-)
-
-
-
+    StructuredGenerationError,)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -71,9 +84,16 @@ COURSE_ID_KEY = "course_id"
 QUIZZES_KEY = "quizzes"
 RESULTS_KEY = "quiz_results"
 ATTEMPTS_KEY = "quiz_attempts"
-EVIDENCE_NOTICES_KEY="evidence_notices"
+EVIDENCE_NOTICES_KEY = "evidence_notices"
+UPLOADER_KEY = "pdf_uploader"
 
-UPLOADER_KEY="pdf_uploader"
+SAVED_ID_KEY = "saved_course_id"
+SAVED_CREATED_KEY = "saved_created_at"
+SAVED_AT_KEY = "saved_updated_at"
+SAVED_HASH_KEY = "saved_content_hash"
+SOURCE_DOC_KEY = "source_document"
+SELECTED_LESSON_KEY = "selected_lesson"
+SAVE_FLASH_KEY = "save_flash"
 
 COURSE_STATE_KEYS = (
     CONFIG_KEY,
@@ -85,7 +105,14 @@ COURSE_STATE_KEYS = (
     ATTEMPTS_KEY,
     EVIDENCE_NOTICES_KEY,
     COURSE_MATERIAL_KEY,
+    SAVED_ID_KEY,
+    SAVED_CREATED_KEY,
+    SAVED_AT_KEY,
+    SAVED_HASH_KEY,
+    SOURCE_DOC_KEY,
+    SELECTED_LESSON_KEY,
 )
+
 
 def render_header():
     st.title("Mini ClassBuild")
@@ -112,15 +139,14 @@ def render_sidebar():
 
         st.subheader("Available Now")
 
-        
         st.write(
             "- Course outline generation\n"
             "- Detailed lesson content\n"
             "- Five-question quizzes\n"
-            "- Automatic quiz grading\n"
+            "- Automatic quiz grading"
             "- PDF upload and summary\n"
             "- Semantic search in uploaded PDFs\n"
-            "- PDF-grounded lessons"
+            "- PDF-grounded lessons\n"
         )
 
         st.subheader("Coming Soon")
@@ -145,20 +171,17 @@ def render_learning_materials():
     st.header("Learning Materials")
 
     upload = st.file_uploader(
-    "Upload a PDF file",
-    type=["pdf"],
-    key=UPLOADER_KEY,
-    )
-    upload_data = (
-    (upload.name, upload.getvalue())
-    if upload is not None
-    else None
+        "Upload a PDF file",
+        type=["pdf"],
+        key=UPLOADER_KEY,
     )
 
-    status = sync_learning_material(
-        st.session_state,
-        upload_data,
+    upload_data = (
+        (upload.name, upload.getvalue())
+        if upload is not None
+        else None
     )
+    status = sync_learning_material(st.session_state, upload_data)
 
     if status.error:
         st.error(status.error)
@@ -168,6 +191,13 @@ def render_learning_materials():
 
     if document is None:
         return
+
+    required_document = required_source_document()
+    if (
+        required_document is not None
+        and document.fingerprint == required_document.fingerprint
+    ):
+        attach_material_to_course(st.session_state)
 
     render_document_summary(document)
     render_pdf_search(document)
@@ -201,6 +231,16 @@ def render_document_summary(document):
 
 
 def render_course_material_note():
+    required_document = required_source_document()
+
+    if required_document is not None and not pdf_features_allowed():
+        st.info(
+            "This saved course uses the following PDF. "
+            "Upload the same original file to re-enable PDF-based features:"
+        )
+        st.text(required_document.filename)
+        return
+
     document = material_for_course(st.session_state)
 
     if document is None:
@@ -211,6 +251,7 @@ def render_course_material_note():
         st.caption(
             f"Course reference material: {document.filename}"
         )
+
 
 def render_pdf_search(document):
     st.subheader("Search in PDF")
@@ -223,10 +264,11 @@ def render_pdf_search(document):
             f"{document.fingerprint[:12]}"
         ),
     )
-    course_id = st.session_state.get(COURSE_ID_KEY, "no_course")
+
     if st.button(
         "Search PDF",
-        key=f"search_button_{course_id}_{document.fingerprint[:12]}",    ):
+        key=f"search_button_{document.fingerprint[:12]}",
+    ):
         try:
             with st.spinner("Searching the document..."):
                 outcome = run_search(
@@ -256,6 +298,7 @@ def render_pdf_search(document):
             results,
         )
 
+
 def render_search_results(query, results):
     st.markdown("### Search Results")
 
@@ -273,12 +316,35 @@ def render_search_results(query, results):
             )
             st.text(result.text)
 
+
+def required_source_document():
+    """Return the saved PDF metadata required by the current loaded course."""
+    return st.session_state.get(SOURCE_DOC_KEY)
+
+
+def pdf_features_allowed():
+    """Allow PDF-grounded features only when the required PDF fingerprint matches."""
+    required_document = required_source_document()
+    if required_document is None:
+        return True
+
+    return current_pdf_fingerprint() == required_document.fingerprint
+
+
+def plain(text):
+    """Escape Markdown punctuation so filenames are displayed as plain text."""
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!|>])", r"\\\1", str(text))
+
+
 def current_pdf_fingerprint():
     document = st.session_state.get(DOC_KEY)
     return document.fingerprint if document else None
 
 
 def drop_stale_grounded_lessons():
+    if st.session_state.get(SAVED_ID_KEY):
+        return
+
     lessons = get_lesson_cache()
 
     stale_numbers = [
@@ -321,6 +387,16 @@ def current_evidence_notice(lesson_number):
 
 
 def render_pdf_reference_option():
+    if not pdf_features_allowed():
+        required_document = required_source_document()
+        if required_document is not None:
+            st.warning(
+                "PDF-based lesson generation is disabled until you upload "
+                "the original PDF used by this saved course:"
+            )
+            st.text(required_document.filename)
+        return None
+
     document = material_for_course(st.session_state)
 
     if document is None:
@@ -336,13 +412,14 @@ def render_pdf_reference_option():
 
     return document if use_pdf else None
 
+
 def generate_grounded_lesson(outline, lesson_number, document):
     service = EmbeddingService()
 
     index, _ = get_or_build_index(
-    st.session_state,
-    document,
-    service,
+        st.session_state,
+        document,
+        service,
     )
 
     return GroundedLessonGenerator().generate_lesson(
@@ -352,7 +429,13 @@ def generate_grounded_lesson(outline, lesson_number, document):
         index,
     )
 
-# Course Form
+
+def keep_previous_course_notice():
+    if st.session_state.get(OUTLINE_KEY) is not None:
+        st.warning(
+            "The new course could not be generated. Your previous course "
+            "is still available below and has not been changed."
+        )
 
 def render_form():
 
@@ -386,55 +469,60 @@ def render_form():
 
     if not submitted:
         return
-
-    # Clear the previous course before generating a new one.
-    for key in COURSE_STATE_KEYS:
-        st.session_state.pop(key, None)
-
+    
     try:
         config = validate_course_config(
             topic=topic,
             difficulty=difficulty,
             lesson_count=lesson_count,
+    
         )
-
     except CourseConfigError as error:
         st.error(str(error))
+        keep_previous_course_notice()
         return
 
     try:
         with st.spinner("Generating your course outline..."):
             outline = CourseGenerator().generate_outline(config)
 
+        # Clear old course data only after the new outline passed validation.
+        for key in COURSE_STATE_KEYS:
+            st.session_state.pop(key, None)
+
         st.session_state[CONFIG_KEY] = config
         st.session_state[OUTLINE_KEY] = outline
         st.session_state[COURSE_ID_KEY] = uuid.uuid4().hex[:8]
         attach_material_to_course(st.session_state)
+       
         st.success("Your course was generated successfully!")
-
         st.rerun()
 
-    except ContentValidationError as error:
+    except ContentValidationError:
         logger.exception("Course content validation failed.")
         st.error(
             "The generated course did not pass validation. "
             "Please try again."
         )
+        keep_previous_course_notice()
 
     except CourseGenerationError as error:
         logger.exception("Course generation failed.")
         st.error(f"Could not generate the course: {error}")
+        keep_previous_course_notice()
 
-    except StructuredGenerationError as error:
+    except StructuredGenerationError:
         logger.exception("Structured course generation failed.")
         st.error(
             "The AI could not generate a valid course. "
             "Please try again."
         )
+        keep_previous_course_notice()
 
     except GroqClientError as error:
         logger.exception("Groq request failed.")
         st.error(f"AI service error: {error}")
+        keep_previous_course_notice()
 
     except Exception:
         logger.exception("Unexpected error while generating course.")
@@ -442,9 +530,7 @@ def render_form():
             "Something unexpected happened. "
             "Please try again later."
         )
-
-
-# Lesson Cache
+        keep_previous_course_notice()
 
 def get_lesson_cache():
     if LESSONS_KEY not in st.session_state:
@@ -456,9 +542,9 @@ def get_lesson_cache():
 # Lesson Generation
 
 def generate_lesson_content(lesson_number, document=None):
+    st.session_state[SELECTED_LESSON_KEY] = lesson_number
+    
     lesson_cache = get_lesson_cache()
-
-
     if lesson_number in lesson_cache:
         return True
 
@@ -547,6 +633,7 @@ def render_lesson_sources(content):
             )
             st.text(source.text)
 
+
 # Display Lesson Content
 
 def render_lesson_content(content):
@@ -556,9 +643,15 @@ def render_lesson_content(content):
     st.write(content.introduction)
 
     if content.is_grounded:
+        citation_label = (
+            "Based on the uploaded PDF"
+            if pdf_features_allowed()
+            else "Saved PDF citations (source file not currently loaded)"
+        )
         st.caption(
-            "Based on the uploaded PDF · "
-            f"Cited pages: {', '.join(map(str, content.cited_pages))}"
+            citation_label
+            + " · Cited pages: "
+            + ", ".join(map(str, content.cited_pages))
         )
 
     source_map = {}
@@ -604,11 +697,7 @@ def render_lesson_content(content):
 
     if content.is_grounded:
         render_lesson_sources(content)
-
-
-# Quiz Session State Helpers
-
-
+        
 def _state_dict(key):
 
     if key not in st.session_state:
@@ -637,6 +726,7 @@ def quiz_widget_prefix(lesson_number):
 
 def retake_quiz(lesson_number):
 
+    st.session_state[SELECTED_LESSON_KEY] = lesson_number
     results = _state_dict(RESULTS_KEY)
     attempts = _state_dict(ATTEMPTS_KEY)
 
@@ -647,11 +737,12 @@ def retake_quiz(lesson_number):
     )
 
 
-# Quiz Generation
+
 
 
 def generate_quiz(lesson_number):
 
+    st.session_state[SELECTED_LESSON_KEY] = lesson_number
     quizzes = _state_dict(QUIZZES_KEY)
 
     # Keep an existing quiz instead of generating another one.
@@ -712,10 +803,10 @@ def render_quiz_section(lesson_number):
 
         if st.button(
             "Generate Quiz",
-           key=(
-               f"generate_quiz_"
-               f"{st.session_state.get(COURSE_ID_KEY, 'no_course')}_"
-               f"{lesson_number}"
+            key=(
+                f"generate_quiz_"
+                f"{st.session_state.get(COURSE_ID_KEY, 'no_course')}_"
+                f"{lesson_number}"
             ),
         ):
             generated = generate_quiz(lesson_number)
@@ -777,6 +868,7 @@ def render_quiz_form(quiz, lesson_number):
     try:
         result = grade_quiz(quiz, answers)
 
+        st.session_state[SELECTED_LESSON_KEY] = lesson_number
         _state_dict(RESULTS_KEY)[lesson_number] = result
 
         st.rerun()
@@ -803,8 +895,8 @@ def render_quiz_result(result):
     st.markdown("### Your Answers")
 
     for index, question_result in enumerate(
-    result.question_results,
-    start=1,
+        result.question_results,
+        start=1,
     ):
 
         if question_result.is_correct:
@@ -835,10 +927,12 @@ def render_quiz_result(result):
     ):
         retake_quiz(result.lesson_number)
         st.rerun()
+
+
 # Course Outline
 
 def render_outline():
-   
+
     outline = st.session_state.get(OUTLINE_KEY)
 
     if outline is None:
@@ -853,11 +947,11 @@ def render_outline():
     widget_scope = f"{course_id}_{pdf_fingerprint[:12]}"
 
     st.divider()
-    
+
     st.header(outline.title)
 
     st.write(f"**Difficulty:** {outline.difficulty}")
-    
+
     st.write(outline.description)
 
     st.subheader("Learning Objectives")
@@ -865,11 +959,40 @@ def render_outline():
     for objective in outline.learning_objectives:
         st.markdown(f"- {objective}")
 
+    st.download_button(
+        "Download Course as Markdown",
+        data=course_to_markdown(
+            outline,
+            st.session_state[CONFIG_KEY].topic,
+            list(get_lesson_cache().values()),
+            list(_state_dict(QUIZZES_KEY).values()),
+        ),
+        file_name=course_filename(outline.title),
+        mime="text/markdown",
+        key=(
+            f"download_course_"
+            f"{st.session_state.get(COURSE_ID_KEY, 'course')}"
+        ),
+    )
+
     st.divider()
 
     st.header("Course Lessons")
 
     lesson_cache = get_lesson_cache()
+    selected_lesson = st.session_state.get(SELECTED_LESSON_KEY)
+    valid_lesson_numbers = {
+        lesson.lesson_number for lesson in outline.lessons
+    }
+
+    if selected_lesson not in valid_lesson_numbers:
+        selected_lesson = (
+            outline.lessons[0].lesson_number
+            if outline.lessons
+            else None
+        )
+        if selected_lesson is not None:
+            st.session_state[SELECTED_LESSON_KEY] = selected_lesson
 
     for lesson in outline.lessons:
 
@@ -877,9 +1000,9 @@ def render_outline():
 
         with st.expander(
             f"Lesson {lesson_number}: {lesson.title}",
-            expanded=False,
+            expanded=(lesson_number == selected_lesson),
         ):
-            
+
             st.write("**Learning Objectives**")
 
             for objective in lesson.learning_objectives:
@@ -919,6 +1042,284 @@ def render_outline():
                     )
                     st.rerun()
 
+# Saved Courses (Stage 3)
+
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def current_saved_course(course_id=None):
+    outline = st.session_state.get(OUTLINE_KEY)
+    config = st.session_state.get(CONFIG_KEY)
+
+    if outline is None or config is None:
+        raise ValueError("Generate or load a course before saving it.")
+
+    selected_lesson = st.session_state.get(SELECTED_LESSON_KEY)
+    created_at = st.session_state.get(SAVED_CREATED_KEY)
+
+    return build_saved_course(
+        course_id=(
+            course_id
+            or st.session_state.get(SAVED_ID_KEY)
+            or new_course_id()
+        ),
+        topic=config.topic,
+        outline=outline,
+        lessons=list(get_lesson_cache().values()),
+        quizzes=list(_state_dict(QUIZZES_KEY).values()),
+        created_at=created_at,
+        selected_lesson=selected_lesson,
+    )
+
+
+def save_current_course(store):
+    """Save or update the current course; mutate session metadata only on success."""
+    try:
+        saved_course = current_saved_course()
+        store.save(saved_course)
+
+    except InvalidCourseIdError as error:
+        st.error(
+            f"The course could not be saved because its saved ID is invalid: {error}"
+        )
+        return False
+
+    except CourseNotFoundError as error:
+        st.error(
+            f"The saved course could not be found for updating: {error}"
+        )
+        return False
+
+    except CourseFileTooLargeError as error:
+        st.error(f"The course is too large to save: {error}")
+        return False
+
+    except CorruptedCourseFileError as error:
+        st.error(f"The saved course file is damaged: {error}")
+        return False
+
+    except UnsupportedSchemaVersionError as error:
+        st.error(
+            f"This saved course uses an unsupported format: {error}"
+        )
+        return False
+
+    except CourseStorageError as error:
+        st.error(f"Could not save the course: {error}")
+        return False
+
+    except (ValidationError, ValueError) as error:
+        st.error(
+            f"The current course is not valid for saving: {error}"
+        )
+        return False
+
+    except Exception:
+        logger.exception(
+            "Unexpected error while saving the current course."
+        )
+        st.error(
+            "Something unexpected happened while saving the course. "
+            "Your current course is unchanged."
+        )
+        return False
+
+    st.session_state[SAVED_ID_KEY] = saved_course.course_id
+    st.session_state[SAVED_CREATED_KEY] = saved_course.created_at
+    st.session_state[SAVED_AT_KEY] = saved_course.updated_at
+    st.session_state[SAVED_HASH_KEY] = saved_course.content_hash()
+    st.session_state[SOURCE_DOC_KEY] = saved_course.source_document
+    st.session_state[SAVE_FLASH_KEY] = "Course saved successfully."
+
+    return True
+
+
+def restore_saved_course(course):
+    """Restore a saved course without calling Groq or reusing old widget state."""
+    config = validate_course_config(
+        topic=course.topic,
+        difficulty=course.difficulty,
+        lesson_count=len(course.outline.lessons),
+    )
+
+    for key in COURSE_STATE_KEYS:
+        st.session_state.pop(key, None)
+
+    st.session_state[CONFIG_KEY] = config
+    st.session_state[OUTLINE_KEY] = course.outline
+    st.session_state[LESSONS_KEY] = course.lessons_by_number()
+    st.session_state[QUIZZES_KEY] = course.quizzes_by_number()
+    st.session_state[RESULTS_KEY] = {}
+    st.session_state[ATTEMPTS_KEY] = {}
+    st.session_state[EVIDENCE_NOTICES_KEY] = {}
+    st.session_state[COURSE_ID_KEY] = uuid.uuid4().hex[:8]
+    st.session_state[SAVED_ID_KEY] = course.course_id
+    st.session_state[SAVED_CREATED_KEY] = course.created_at
+    st.session_state[SAVED_AT_KEY] = course.updated_at
+    st.session_state[SAVED_HASH_KEY] = course.content_hash()
+    st.session_state[SOURCE_DOC_KEY] = course.source_document
+    st.session_state[SELECTED_LESSON_KEY] = course.selected_lesson
+    st.session_state[SAVE_FLASH_KEY] = "Saved course loaded successfully."
+
+
+def _summary_label(summary):
+    title = (
+        getattr(summary, "title", None)
+        or getattr(summary, "topic", "Saved course")
+    )
+    updated_at = getattr(summary, "updated_at", None)
+    lesson_count = getattr(summary, "lesson_count", None)
+    quiz_count = getattr(summary, "quiz_count", None)
+    has_pdf = getattr(
+        summary,
+        "has_pdf",
+        getattr(summary, "pdf_based", False),
+    )
+
+    details = []
+
+    if lesson_count is not None:
+        details.append(f"{lesson_count} lessons")
+
+    if quiz_count is not None:
+        details.append(f"{quiz_count} quizzes")
+
+    if has_pdf:
+        details.append("PDF-based")
+
+    if updated_at:
+        details.append(f"Updated: {updated_at}")
+
+    suffix = " · ".join(details)
+
+    return f"{title} · {suffix}" if suffix else str(title)
+
+
+def render_saved_courses():
+    st.divider()
+    st.header("Saved Courses")
+
+    flash = st.session_state.pop(SAVE_FLASH_KEY, None)
+
+    if flash:
+        st.success(flash)
+
+    outline = st.session_state.get(OUTLINE_KEY)
+
+    if outline is not None:
+        try:
+            current_course = current_saved_course()
+            saved_id = st.session_state.get(SAVED_ID_KEY)
+            saved_hash = st.session_state.get(SAVED_HASH_KEY)
+
+            has_unsaved_changes = bool(
+                saved_id
+                and saved_hash
+                and current_course.content_hash() != saved_hash
+            )
+
+            if has_unsaved_changes:
+                st.info("This course has unsaved changes.")
+
+            save_label = (
+                "Update Saved Course"
+                if saved_id
+                else "Save Course"
+            )
+
+            if st.button(
+                save_label,
+                type="primary",
+                key="save_or_update_course",
+            ):
+                if save_current_course(CourseStore()):
+                    st.rerun()
+
+        except (ValidationError, ValueError) as error:
+            st.warning(
+                f"This course cannot be saved yet: {error}"
+            )
+
+    try:
+        store = CourseStore()
+        listing = store.list_courses()
+
+    except CourseStorageError as error:
+        st.error(f"Could not read saved courses: {error}")
+        return
+
+    for issue in listing.issues:
+        st.warning(str(issue))
+
+    summaries = list(listing.courses)
+
+    if not summaries:
+        st.caption("No saved courses yet.")
+        return
+
+    labels = {
+        summary.course_id: _summary_label(summary)
+        for summary in summaries
+    }
+
+    selected_id = st.selectbox(
+        "Choose a saved course",
+        options=[
+            summary.course_id
+            for summary in summaries
+        ],
+        format_func=lambda course_id: labels.get(
+            course_id,
+            course_id,
+        ),
+        key="saved_course_picker",
+    )
+
+    if st.button(
+        "Load Selected Course",
+        key="load_selected_course",
+    ):
+        try:
+            saved_course = store.load(selected_id)
+            restore_saved_course(saved_course)
+            st.rerun()
+
+        except InvalidCourseIdError as error:
+            st.error(
+                f"The selected course ID is invalid: {error}"
+            )
+
+        except CourseNotFoundError as error:
+            st.error(
+                f"The selected saved course no longer exists: {error}"
+            )
+
+        except CourseFileTooLargeError as error:
+            st.error(
+                f"The saved course file is too large: {error}"
+            )
+
+        except CorruptedCourseFileError as error:
+            st.error(
+                f"The selected saved course is damaged: {error}"
+            )
+
+        except UnsupportedSchemaVersionError as error:
+            st.error(
+                f"The selected course uses an unsupported format: {error}"
+            )
+
+        except CourseStorageError as error:
+            st.error(
+                f"Could not load the selected course: {error}"
+            )
+
+        except (ValidationError, ValueError) as error:
+            st.error(
+                f"The saved course could not be restored: {error}"
+            )
+
 
 # Main Application
 
@@ -936,8 +1337,11 @@ def main():
     render_learning_materials()
     render_form()
 
+    saved_courses_container = st.container()
     render_outline()
 
+    with saved_courses_container:
+        render_saved_courses()
 
 if __name__ == "__main__":
 

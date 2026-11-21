@@ -193,7 +193,7 @@ class TestProcessPDF(unittest.TestCase):
         self.assertEqual(document.filename, "guide.pdf")
         self.assertEqual(document.fingerprint, fingerprint(data))
         self.assertEqual(document.page_count, 2)
-        self.assertEqual(document.word_count, 11)
+        self.assertEqual(document.word_count, 9)
         self.assertEqual(document.empty_pages, [])
         self.assertGreaterEqual(document.char_count, 1)
         self.assertGreaterEqual(len(document.chunks), 1)

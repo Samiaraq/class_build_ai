@@ -1,4 +1,12 @@
 
 .venv/
 __pycache__
+*.py[cod]
 .env
+evaluation_results/
+saved_courses/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log

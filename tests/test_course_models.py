@@ -30,6 +30,14 @@ class ValidOutlineTests(unittest.TestCase):
 
         self.assertEqual(outline.title, "Python Basics")
 
+    def test_different_lesson_titles_pass(self):
+        data = copy_of(valid_outline(lesson_count=3))
+        data["lessons"][1]["title"] = "Advanced Python"
+
+        outline = validate_outline(data)
+
+        self.assertEqual(len(outline.lessons), 3)
+
 
 class RejectedOutlineTests(unittest.TestCase):
 
@@ -191,6 +199,15 @@ class RejectedOutlineTests(unittest.TestCase):
         validate_outline(data)
 
         self.assertEqual(data, original)
+
+    def test_duplicate_lesson_titles_rejected(self):
+        data = copy_of(valid_outline(lesson_count=3))
+        data["lessons"][1]["title"] = (
+            f"  {data['lessons'][0]['title'].upper()}  "
+        )
+
+        with self.assertRaises(ValidationError):
+            validate_outline(data)
 
 
 if __name__ == "__main__":

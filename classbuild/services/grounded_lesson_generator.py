@@ -37,6 +37,51 @@ TOP_K = 3
 SCHEMA_NAME = "grounded_lesson"
 logger = logging.getLogger(__name__)
 
+PAGE_MENTION = re.compile(
+    r"\b(?:page|pages|pp?\.?)\s*(\d+)\b",
+    re.IGNORECASE,
+)
+
+
+def mentioned_pages(text: str) -> set[int]:
+    return {
+        int(match)
+        for match in PAGE_MENTION.findall(text)
+    }
+
+
+def uncited_page_mentions(lesson: LessonContent) -> list[str]:
+    cited_pages = set(lesson.cited_pages)
+
+    text_parts = [
+        lesson.introduction,
+        lesson.summary,
+    ]
+
+    for section in lesson.sections:
+        text_parts.extend([
+            section.heading,
+            section.explanation,
+            section.example,
+        ])
+
+    for exercise in lesson.exercises:
+        text_parts.extend([
+            exercise.question,
+            exercise.hint,
+        ])
+
+    mentioned = set()
+
+    for text in text_parts:
+        mentioned.update(mentioned_pages(text))
+
+    uncited = sorted(mentioned - cited_pages)
+
+    return [
+        f"Page {page} is mentioned in the lesson but is not cited."
+        for page in uncited
+    ]
 
 GROUNDING_RULES = """
 Use only the supplied PDF passages as evidence.
@@ -497,10 +542,16 @@ class GroundedLessonGenerator:
                 "no_citations",
                 passages,
             )
-
-        return draft_to_lesson(
+        lesson = draft_to_lesson(
             draft,
             passages,
             document,
             retrieval_query,
         )
+
+        problems = uncited_page_mentions(lesson)
+
+        if problems:
+            raise LessonValidationError("\n".join(problems))
+
+        return lesson

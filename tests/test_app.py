@@ -283,19 +283,20 @@ class AppTests(BaseAppTest):
             self.app.session_state[OUTLINE_KEY]
         )
 
-    def test_failure_clears_stale_outline(self):
+    def test_failure_preserves_previous_outline(self):
         submit(self.app, "First Course")
 
-        self.assertIsNotNone(
-            self.app.session_state[OUTLINE_KEY]
-        )
+        previous_outline = self.app.session_state[OUTLINE_KEY]
+
+        self.assertIsNotNone(previous_outline)
 
         FakeCourseGenerator.should_fail = True
 
         submit(self.app, "Second Course")
 
-        self.assertIsNone(
-            self.app.session_state.get(OUTLINE_KEY)
+        self.assertIs(
+            self.app.session_state.get(OUTLINE_KEY),
+            previous_outline,
         )
 
     def test_lessons_generated_individually_and_cached(self):

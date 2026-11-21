@@ -1,6 +1,6 @@
 
 import json
-
+import re
 from groq import (
     Groq,
     APIConnectionError,
@@ -32,10 +32,19 @@ REASONING_MODELS = {
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
 }
+def redact_secrets(text):
+    """Hide Groq API keys from error messages."""
+    return re.sub(r"gsk_[A-Za-z0-9_-]+", "[redacted]", str(text))
 
 
 class GroqClient:
-    def __init__(self, api_key=None, model=None, timeout_seconds=None):
+    def __init__(
+        self,
+        api_key=None,
+        model=None,
+        timeout_seconds=None,
+        max_retries=None,
+    ):
         settings = get_settings()
 
         api_key = api_key or settings.groq_api_key
@@ -44,6 +53,11 @@ class GroqClient:
             timeout_seconds
             if timeout_seconds is not None
             else settings.request_timeout_seconds
+        )
+        self.max_retries = (
+            max_retries
+            if max_retries is not None
+            else settings.max_retries
         )
 
         if not api_key:
@@ -54,6 +68,7 @@ class GroqClient:
         self.client = Groq(
             api_key=api_key,
             timeout=self.timeout_seconds,
+            max_retries=self.max_retries,
         )
 
     def supports_strict_schema(self):
@@ -244,6 +259,7 @@ class GroqClient:
 
         return None
 
+    
     @staticmethod
     def _error_detail(exc):
         try:
@@ -252,8 +268,8 @@ class GroqClient:
             if isinstance(error, dict):
                 message = error.get("message")
                 if message:
-                    return message
+                    return redact_secrets(message)
         except (ValueError, AttributeError):
             pass
 
-        return str(exc)
+        return redact_secrets(str(exc))

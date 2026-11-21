@@ -21,6 +21,7 @@ from classbuild.services.grounded_lesson_generator import (
     grounded_lesson_json_schema,
     to_source_reference,
     draft_to_lesson,
+    uncited_page_mentions,
     GroundedLessonGenerator,
 )
 
@@ -496,7 +497,28 @@ class TestInsufficientEvidenceError(unittest.TestCase):
             str(error),
             "Insufficient PDF evidence.",
         )
+class TestUncitedPageMentions(unittest.TestCase):
 
+    def test_detects_uncited_page_mentions(self):
+        document = make_document()
+        passages = make_results()[:2]
+        draft = make_draft()
+
+        lesson = draft_to_lesson(
+            draft,
+            passages,
+            document,
+            "Python Course Python Basics",
+        )
+
+        lesson.summary = "More details are explained on page 2."
+
+        problems = uncited_page_mentions(lesson)
+
+        self.assertEqual(
+            problems,
+            ["Page 2 is mentioned in the lesson but is not cited."],
+        )
 
 class TestGroundedLessonGenerator(unittest.TestCase):
 
@@ -632,7 +654,10 @@ class TestGroundedLessonGenerator(unittest.TestCase):
         ) as mocked_request, patch(
             "classbuild.services.grounded_lesson_generator.draft_to_lesson",
             return_value=Mock(spec=LessonContent),
-        ) as mocked_convert:
+        ) as mocked_convert, patch(
+            "classbuild.services.grounded_lesson_generator.uncited_page_mentions",
+            return_value=[],
+        ):
 
             result = self.generator.generate_lesson(
                 self.outline,

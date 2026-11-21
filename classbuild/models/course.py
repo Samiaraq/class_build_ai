@@ -55,6 +55,18 @@ class CourseOutline(BaseModel):
             )
 
         return self
+    
+    @model_validator(mode="after")
+    def check_unique_lesson_titles(self):
+        normalized_titles = [
+            " ".join(lesson.title.casefold().split())
+            for lesson in self.lessons
+        ]
+
+        if len(normalized_titles) != len(set(normalized_titles)):
+            raise ValueError("Lesson titles must be unique.")
+
+        return self
 
     @model_validator(mode="after")
     def check_matches_request(self, info: ValidationInfo):
